@@ -3,7 +3,6 @@ import time
 import math
 from datetime import datetime, timezone, timedelta
 import numpy as np
-
 import requests
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
@@ -291,3 +290,4 @@ if __name__ == "__main__":
     import uvicorn
 
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
