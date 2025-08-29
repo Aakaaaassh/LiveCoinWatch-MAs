@@ -286,7 +286,7 @@ def get_accurate_ma(
         }
     }
 
-
+'''
 
 @app.get("/ma/debug")
 def debug_data_quality(
@@ -357,9 +357,10 @@ def debug_data_quality(
             "daily_coverage": round(len(daily_df) / days, 2)
         }
     }
-
+'''
 
 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
