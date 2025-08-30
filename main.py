@@ -286,6 +286,100 @@ def get_accurate_ma(
         }
     }
 
+
+def get_4hourly_history(code: str, currency: str = "USD"):
+    """Get true 4H data with 2 API calls for 200-period support"""
+    
+    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    
+    # Chunk 1: Recent 400 hours (100 points at 4H intervals)
+    chunk1_start = end_time - (1_440_000_000)
+    chunk1_data = lcw_history_chunk(code, chunk1_start, end_time, currency)
+    
+    time.sleep(0.5)  # Rate limiting
+    
+    # Chunk 2: Previous 400 hours (another 100 points at 4H intervals)  
+    chunk2_start = chunk1_start - (1_440_000_000)
+    chunk2_data = lcw_history_chunk(code, chunk2_start, chunk1_start, currency)
+    
+    # Combine and deduplicate
+    all_data = chunk2_data + chunk1_data
+    unique_data = {item['date']: item for item in all_data}
+    
+    return sorted(unique_data.values(), key=lambda x: x['date'])
+
+def resample_to_4hourly(df: pd.DataFrame):
+    """Process API data into clean 4-hourly structure"""
+    
+    df['datetime'] = pd.to_datetime(df['date'], unit='ms', utc=True)
+    df = df.sort_values('datetime').reset_index(drop=True)
+    
+    return pd.DataFrame({
+        'datetime': df['datetime'],
+        'close': df['rate'],     # Most important for MA calculation
+        'volume': df['volume'],
+        'open': df['rate'],      # API provides point data
+        'high': df['rate'],      # Could be enhanced with OHLC
+        'low': df['rate']        # if API provided more granular data
+    })
+
+def calculate_4hourly_ma(df: pd.DataFrame, periods: list):
+    """Calculate SMA/EMA on 4-hourly close prices"""
+    
+    closes = pd.Series(df['close'].values, index=df['datetime'])
+    results = {}
+    
+    for period in periods:
+        if len(df) >= period:
+            # SMA calculation
+            sma = closes.rolling(window=period).mean().iloc[-1]
+            # EMA calculation  
+            ema = closes.ewm(span=period).mean().iloc[-1]
+            
+            results[f"{period}_4H"] = {
+                "SMA": float(sma),
+                "EMA": float(ema),
+                "timeframe": "4H"
+            }
+    
+    return results
+
+@app.get("/ma/4hourly")
+def get_4hourly_ma(
+    code: str = Query(...),
+    currency: str = Query("USD"),
+    periods: str = Query("50,100,200")
+):
+    """Get 4-hourly SMA & EMA with single API call efficiency"""
+    
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not set")
+    
+    period_list = [int(p.strip()) for p in periods.split(",")]
+    
+    # Single optimized API call
+    history = get_4hourly_history(code, currency)
+    if not history:
+        raise HTTPException(status_code=404, detail="No data available")
+    
+    # Process 4-hourly data
+    df = pd.DataFrame(history)
+    fourly_df = resample_to_4hourly(df)
+    
+    # Calculate MAs
+    ma_results = calculate_4hourly_ma(fourly_df, period_list)
+    
+    return {
+        "symbol": code.upper(),
+        "timeframe": "4H",
+        "api_calls_used": 1,
+        "moving_averages": ma_results,
+        "data_quality": {
+            "fourly_candles": len(fourly_df),
+            "time_span_hours": round((fourly_df['datetime'].iloc[-1] - fourly_df['datetime'].iloc[0]).total_seconds() / 3600, 1)
+        }
+    }
+
 '''
 
 @app.get("/ma/debug")
@@ -363,4 +457,5 @@ def debug_data_quality(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
