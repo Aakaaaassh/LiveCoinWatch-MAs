@@ -380,6 +380,254 @@ def get_4hourly_ma(
         }
     }
 
+
+# Time constants
+MS_9DAY_CHUNK = 77_760_000_000   # 900 days in milliseconds (100 periods of 9-day intervals)
+MS_21DAY_CHUNK = 181_440_000_000  # 2100 days in milliseconds (100 periods of 21-day intervals)
+
+def get_9daily_history(code: str, currency: str = "USD"):
+    """Get true 9-day data with 2 API calls for 200-period support"""
+    
+    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    
+    # Chunk 1: Recent 900 days (100 points at 9-day intervals)
+    chunk1_start = end_time - MS_9DAY_CHUNK
+    chunk1_data = lcw_history_chunk(code, chunk1_start, end_time, currency)
+    
+    time.sleep(0.5)  # Rate limiting
+    
+    # Chunk 2: Previous 900 days (another 100 points at 9-day intervals)  
+    chunk2_start = chunk1_start - MS_9DAY_CHUNK
+    chunk2_data = lcw_history_chunk(code, chunk2_start, chunk1_start, currency)
+    
+    # Combine and deduplicate
+    all_data = chunk2_data + chunk1_data
+    unique_data = {item['date']: item for item in all_data}
+    
+    return sorted(unique_data.values(), key=lambda x: x['date'])
+
+def get_21daily_history(code: str, currency: str = "USD"):
+    """Get true 21-day data with 2 API calls for 200-period support"""
+    
+    end_time = int(datetime.now(timezone.utc).timestamp() * 1000)
+    
+    # Chunk 1: Recent 2100 days (100 points at 21-day intervals)
+    chunk1_start = end_time - MS_21DAY_CHUNK
+    chunk1_data = lcw_history_chunk(code, chunk1_start, end_time, currency)
+    
+    time.sleep(0.5)  # Rate limiting
+    
+    # Chunk 2: Previous 2100 days (another 100 points at 21-day intervals)  
+    chunk2_start = chunk1_start - MS_21DAY_CHUNK
+    chunk2_data = lcw_history_chunk(code, chunk2_start, chunk1_start, currency)
+    
+    # Combine and deduplicate
+    all_data = chunk2_data + chunk1_data
+    unique_data = {item['date']: item for item in all_data}
+    
+    return sorted(unique_data.values(), key=lambda x: x['date'])
+
+def resample_to_9daily(df: pd.DataFrame):
+    """Process API data into clean 9-daily structure"""
+    
+    df['datetime'] = pd.to_datetime(df['date'], unit='ms', utc=True)
+    df = df.sort_values('datetime').reset_index(drop=True)
+    
+    return pd.DataFrame({
+        'datetime': df['datetime'],
+        'close': df['rate'],     # Most important for MA calculation
+        'volume': df['volume'],
+        'open': df['rate'],      # API provides point data
+        'high': df['rate'],      # Could be enhanced with OHLC
+        'low': df['rate']        # if API provided more granular data
+    })
+
+def resample_to_21daily(df: pd.DataFrame):
+    """Process API data into clean 21-daily structure"""
+    
+    df['datetime'] = pd.to_datetime(df['date'], unit='ms', utc=True)
+    df = df.sort_values('datetime').reset_index(drop=True)
+    
+    return pd.DataFrame({
+        'datetime': df['datetime'],
+        'close': df['rate'],     # Most important for MA calculation
+        'volume': df['volume'],
+        'open': df['rate'],      # API provides point data
+        'high': df['rate'],      # Could be enhanced with OHLC
+        'low': df['rate']        # if API provided more granular data
+    })
+
+def calculate_9daily_ma(df: pd.DataFrame, periods: list):
+    """Calculate SMA/EMA on 9-daily close prices"""
+    
+    closes = pd.Series(df['close'].values, index=df['datetime'])
+    results = {}
+    
+    for period in periods:
+        if len(df) >= period:
+            # SMA calculation
+            sma = closes.rolling(window=period).mean().iloc[-1]
+            # EMA calculation  
+            ema = closes.ewm(span=period).mean().iloc[-1]
+            
+            results[f"{period}_9D"] = {
+                "SMA": float(sma),
+                "EMA": float(ema),
+                "timeframe": "9D"
+            }
+    
+    return results
+
+def calculate_21daily_ma(df: pd.DataFrame, periods: list):
+    """Calculate SMA/EMA on 21-daily close prices"""
+    
+    closes = pd.Series(df['close'].values, index=df['datetime'])
+    results = {}
+    
+    for period in periods:
+        if len(df) >= period:
+            # SMA calculation
+            sma = closes.rolling(window=period).mean().iloc[-1]
+            # EMA calculation  
+            ema = closes.ewm(span=period).mean().iloc[-1]
+            
+            results[f"{period}_21D"] = {
+                "SMA": float(sma),
+                "EMA": float(ema),
+                "timeframe": "21D"
+            }
+    
+    return results
+
+@app.get("/ma/9daily")
+def get_9daily_ma(
+    code: str = Query(...),
+    currency: str = Query("USD"),
+    periods: str = Query("50,100,200")
+):
+    """Get 9-daily SMA & EMA with optimized API calls"""
+    
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not set")
+    
+    period_list = [int(p.strip()) for p in periods.split(",")]
+    
+    # Optimized API calls for 9-day intervals
+    history = get_9daily_history(code, currency)
+    if not history:
+        raise HTTPException(status_code=404, detail="No data available")
+    
+    # Process 9-daily data
+    df = pd.DataFrame(history)
+    daily_df = resample_to_9daily(df)
+    
+    # Calculate MAs
+    ma_results = calculate_9daily_ma(daily_df, period_list)
+    
+    return {
+        "symbol": code.upper(),
+        "timeframe": "9D",
+        "api_calls_used": 2,
+        "moving_averages": ma_results,
+        "data_quality": {
+            "daily_candles": len(daily_df),
+            "time_span_days": round((daily_df['datetime'].iloc[-1] - daily_df['datetime'].iloc[0]).total_seconds() / (24 * 3600), 1)
+        }
+    }
+
+@app.get("/ma/21daily")
+def get_21daily_ma(
+    code: str = Query(...),
+    currency: str = Query("USD"),
+    periods: str = Query("50,100,200")
+):
+    """Get 21-daily SMA & EMA with optimized API calls"""
+    
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not set")
+    
+    period_list = [int(p.strip()) for p in periods.split(",")]
+    
+    # Optimized API calls for 21-day intervals
+    history = get_21daily_history(code, currency)
+    if not history:
+        raise HTTPException(status_code=404, detail="No data available")
+    
+    # Process 21-daily data
+    df = pd.DataFrame(history)
+    daily_df = resample_to_21daily(df)
+    
+    # Calculate MAs
+    ma_results = calculate_21daily_ma(daily_df, period_list)
+    
+    return {
+        "symbol": code.upper(),
+        "timeframe": "21D",
+        "api_calls_used": 2,
+        "moving_averages": ma_results,
+        "data_quality": {
+            "daily_candles": len(daily_df),
+            "time_span_days": round((daily_df['datetime'].iloc[-1] - daily_df['datetime'].iloc[0]).total_seconds() / (24 * 3600), 1)
+        }
+    }
+
+# Optional: Combined endpoint for multiple timeframes
+@app.get("/ma/daily-combined")
+def get_daily_ma_combined(
+    code: str = Query(...),
+    currency: str = Query("USD"),
+    timeframes: str = Query("9D,21D"),
+    periods: str = Query("50,100,200")
+):
+    """Get multiple daily timeframe MAs in a single request"""
+    
+    if not API_KEY:
+        raise HTTPException(status_code=500, detail="API key not set")
+    
+    period_list = [int(p.strip()) for p in periods.split(",")]
+    timeframe_list = [tf.strip() for tf in timeframes.split(",")]
+    
+    results = {}
+    total_api_calls = 0
+    
+    for timeframe in timeframe_list:
+        if timeframe == "9D":
+            history = get_9daily_history(code, currency)
+            if history:
+                df = pd.DataFrame(history)
+                daily_df = resample_to_9daily(df)
+                ma_results = calculate_9daily_ma(daily_df, period_list)
+                results[timeframe] = {
+                    "moving_averages": ma_results,
+                    "data_quality": {
+                        "daily_candles": len(daily_df),
+                        "time_span_days": round((daily_df['datetime'].iloc[-1] - daily_df['datetime'].iloc[0]).total_seconds() / (24 * 3600), 1)
+                    }
+                }
+                total_api_calls += 2
+                
+        elif timeframe == "21D":
+            history = get_21daily_history(code, currency)
+            if history:
+                df = pd.DataFrame(history)
+                daily_df = resample_to_21daily(df)
+                ma_results = calculate_21daily_ma(daily_df, period_list)
+                results[timeframe] = {
+                    "moving_averages": ma_results,
+                    "data_quality": {
+                        "daily_candles": len(daily_df),
+                        "time_span_days": round((daily_df['datetime'].iloc[-1] - daily_df['datetime'].iloc[0]).total_seconds() / (24 * 3600), 1)
+                    }
+                }
+                total_api_calls += 2
+    
+    return {
+        "symbol": code.upper(),
+        "timeframes": timeframe_list,
+        "api_calls_used": total_api_calls,
+        "results": results
+    }
+
 '''
 
 @app.get("/ma/debug")
@@ -457,5 +705,6 @@ def debug_data_quality(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
 
 
